@@ -25,7 +25,8 @@ type WholeConfig struct {
 
 // GlobalConfig グローバル部分
 type GlobalConfig struct {
-	Key1 string `yaml:"key1"`
+	Forward string `yaml:"forward"`
+	Port    int    `yaml:"port"`
 }
 
 // EntryConfig エントリー部分。監視したいサーバーのドメインや候補のIPがある
@@ -59,10 +60,10 @@ func pingV4(ip string) bool {
 	return isok
 }
 
-func updateARecord(domain string, ipA string) {
+func updateARecord(handler *CheckServeMux, domain string, ipA string) {
 	rr, _ := dns.NewRR(fmt.Sprintf("%s. 3600 IN A %s", domain, ipA))
 	rrx := rr.(*dns.A)
-	dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
+	handler.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Authoritative = true
@@ -102,12 +103,12 @@ func main() {
 		panic(err)
 	}
 
+	handler := NewCheckServeMux(d.Global.Forward)
 	var zoneIP = make(map[string]string)
-
 	for _, entry := range d.Entries {
 		ip := healthPingCheck(entry)
 		if ip != "" {
-			updateARecord(entry.Domain, ip)
+			updateARecord(handler, entry.Domain, ip)
 			zoneIP[entry.Domain] = ip
 		} else {
 			zoneIP[entry.Domain] = ""
@@ -115,15 +116,17 @@ func main() {
 	}
 
 	log.Println("now serving")
+	port := fmt.Sprintf(":%d", d.Global.Port)
+
 	go func() {
-		srv := &dns.Server{Addr: ":8053", Net: "udp"}
+		srv := &dns.Server{Addr: port, Net: "udp", Handler: handler}
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set udp listener %s\n", err.Error())
 		}
 	}()
 
 	go func() {
-		srv := &dns.Server{Addr: ":8053", Net: "tcp"}
+		srv := &dns.Server{Addr: port, Net: "tcp", Handler: handler}
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set tcp listener %s\n", err.Error())
 		}
@@ -143,7 +146,7 @@ func main() {
 						ip := healthPingCheck(entry)
 						if ip != zoneIP[entry.Domain] {
 							// log.Printf("update %s %s\n", entry.Domain, ip)
-							updateARecord(entry.Domain, ip)
+							updateARecord(handler, entry.Domain, ip)
 						}
 						zoneIP[entry.Domain] = ip
 					}

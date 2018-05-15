@@ -1,5 +1,6 @@
 global:
-  key1: value
+  port: 8053
+  forward: 8.8.8.8:53
 
 
 entries:
