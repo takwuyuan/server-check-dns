@@ -31,7 +31,6 @@ type GlobalConfig struct {
 
 // EntryConfig エントリー部分。監視したいサーバーのドメインや候補のIPがある
 type EntryConfig struct {
-	Type     string   `yaml:"type"`
 	Method   string   `yaml:"method"`
 	Domain   string   `yaml:"domain"`
 	Servers  []string `yaml:"servers"`
@@ -60,15 +59,32 @@ func pingV4(ip string) bool {
 	return isok
 }
 
-func updateARecord(handler *CheckServeMux, domain string, ipA string) {
+func updateARecord(domain string, ipA string) {
 	rr, _ := dns.NewRR(fmt.Sprintf("%s. 3600 IN A %s", domain, ipA))
 	rrx := rr.(*dns.A)
-	handler.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
+	dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Authoritative = true
 		m.Ns = []dns.RR{rrx}
 		w.WriteMsg(m)
+	})
+}
+
+func forwardRecord(domain string, nameserver string) {
+	dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
+		c := new(dns.Client)
+
+		resp, rtt, err := c.Exchange(r, nameserver)
+
+		// does not matter if this write fails
+		if err != nil {
+			fmt.Printf("failed %+v %+v, %+v\n", resp, rtt, err)
+			resp = new(dns.Msg)
+			resp.SetRcode(r, dns.RcodeServerFailure)
+		}
+
+		w.WriteMsg(resp)
 	})
 }
 
@@ -103,15 +119,21 @@ func main() {
 		panic(err)
 	}
 
-	handler := NewCheckServeMux(d.Global.Forward)
 	var zoneIP = make(map[string]string)
 	for _, entry := range d.Entries {
-		ip := healthPingCheck(entry)
-		if ip != "" {
-			updateARecord(handler, entry.Domain, ip)
-			zoneIP[entry.Domain] = ip
-		} else {
-			zoneIP[entry.Domain] = ""
+		log.Printf("domain = %s, method = %s\n", entry.Domain, entry.Method)
+		switch entry.Method {
+		case "forward":
+			forwardRecord(entry.Domain, entry.Servers[0])
+
+		case "ping":
+			ip := healthPingCheck(entry)
+			if ip != "" {
+				updateARecord(entry.Domain, ip)
+				zoneIP[entry.Domain] = ip
+			} else {
+				zoneIP[entry.Domain] = ""
+			}
 		}
 	}
 
@@ -119,14 +141,14 @@ func main() {
 	port := fmt.Sprintf(":%d", d.Global.Port)
 
 	go func() {
-		srv := &dns.Server{Addr: port, Net: "udp", Handler: handler}
+		srv := &dns.Server{Addr: port, Net: "udp"}
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set udp listener %s\n", err.Error())
 		}
 	}()
 
 	go func() {
-		srv := &dns.Server{Addr: port, Net: "tcp", Handler: handler}
+		srv := &dns.Server{Addr: port, Net: "tcp"}
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set tcp listener %s\n", err.Error())
 		}
@@ -140,13 +162,13 @@ func main() {
 			case <-t.C:
 
 				for _, entry := range d.Entries {
-					if tick%entry.Interval == 0 {
+					if entry.Method == "ping" && tick%entry.Interval == 0 {
 						// log.Printf("tick %s %s\n", entry.Domain, zoneIP[entry.Domain])
 
 						ip := healthPingCheck(entry)
 						if ip != zoneIP[entry.Domain] {
 							// log.Printf("update %s %s\n", entry.Domain, ip)
-							updateARecord(handler, entry.Domain, ip)
+							updateARecord(entry.Domain, ip)
 						}
 						zoneIP[entry.Domain] = ip
 					}
